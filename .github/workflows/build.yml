@@ -1,45 +1,123 @@
-name: Build
+name: Build NaiveProxy with cache
 on:
+  workflow_dispatch:
   push:
     branches: [naive]
-    paths-ignore: [README.md]
-  release:
-    types: [published]
-defaults:
-  run:
-    shell: bash
+    paths: [.github/workflows/build.yml]
+permissions:
+  contents: read
+concurrency:
+  group: naive-cache-${{ github.ref }}
+  cancel-in-progress: false
 jobs:
-  build_caddy_with_naive:
-    runs-on: ubuntu-22.04
+  linux-amd64:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     env:
-      BUNDLE: caddy-forwardproxy-naive
+      CGO_ENABLED: '0'
+      GOOS: linux
+      GOARCH: amd64
+      GOAMD64: v1
+      XCADDY_GO_BUILD_FLAGS: '-tags=nobadger,nomysql,nopgx'
     steps:
-      - uses: actions/checkout@v4
-      - run: printf 'CADDY_VERSION=%s\n' "$(<CADDY_VERSION)" >> "$GITHUB_ENV"
-      - uses: actions/checkout@v4
+      - name: Checkout official Naive release source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: klzgrad/forwardproxy
+          ref: c096d6a00cb28e019cc1995b04bdc6a9311d8024
+          path: forwardproxy
+          persist-credentials: false
+      - name: Checkout Caddy 2.11.7
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: caddyserver/caddy
-          ref: ${{ env.CADDY_VERSION }}
-          path: .caddy-bbr
-      - run: git -C .caddy-bbr apply "$GITHUB_WORKSPACE/caddy-sing-quic-bbrv1.patch"
-      - uses: actions/setup-go@v5
-        with:
-          go-version: ^1.26.x
-      - run: go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
-      - run: ~/go/bin/xcaddy build "$CADDY_VERSION" --replace "github.com/caddyserver/caddy/v2=$GITHUB_WORKSPACE/.caddy-bbr" --with "github.com/caddyserver/forwardproxy=$GITHUB_WORKSPACE"
-      - name: Pack naiveproxy assets
+          ref: 72dd0fb067f6d7826c7f79907670ba4a713bfe37
+          path: caddy-bbr
+          persist-credentials: false
+      - name: Apply official QUIC BBRv1 patch
         run: |
-          mkdir ${{ env.BUNDLE }}
-          cp caddy LICENSE README.md ${{ env.BUNDLE }}
-          tar cJf ${{ env.BUNDLE }}.tar.xz ${{ env.BUNDLE }}
-          openssl sha256 ./caddy >sha256sum.txt
-          echo "SHA256SUM=$(cut -d' ' -f2 sha256sum.txt)" >>$GITHUB_ENV
-      - uses: actions/upload-artifact@v4
+          test "$(cat forwardproxy/CADDY_VERSION)" = 'v2.11.7'
+          git -C caddy-bbr apply --check "$GITHUB_WORKSPACE/forwardproxy/caddy-sing-quic-bbrv1.patch"
+          git -C caddy-bbr apply "$GITHUB_WORKSPACE/forwardproxy/caddy-sing-quic-bbrv1.patch"
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
         with:
-          name: ${{ env.BUNDLE }}.tar.xz caddy executable sha256 ${{ env.SHA256SUM }}
-          path: sha256sum.txt
-      - name: Upload caddy assets
-        if: ${{ github.event_name == 'release' }}
-        run: gh release upload "${GITHUB_REF##*/}"  ${{ env.BUNDLE }}.tar.xz --clobber
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          go-version: '1.26.9'
+          cache: false
+      - name: Build with existing cache plugin
+        run: |
+          go install github.com/caddyserver/xcaddy/cmd/xcaddy@v0.4.7
+          "$(go env GOPATH)/bin/xcaddy" build v2.11.7 \
+            --output "$GITHUB_WORKSPACE/caddy" \
+            --replace "github.com/caddyserver/caddy/v2=$GITHUB_WORKSPACE/caddy-bbr" \
+            --with "github.com/caddyserver/forwardproxy=$GITHUB_WORKSPACE/forwardproxy" \
+            --with github.com/caddyserver/cache-handler@v0.16.0
+      - name: Verify modules and test sample configuration
+        run: |
+          ./caddy version
+          ./caddy list-modules --versions | tee modules.txt
+          grep '^http.handlers.forward_proxy ' modules.txt
+          grep '^http.handlers.cache v0.16.0' modules.txt
+          ./caddy build-info | tee build-info.txt
+          grep 'github.com/sagernet/sing-quic' build-info.txt
+          cat > smoke.Caddyfile <<'EOF'
+          {
+            admin off
+            auto_https off
+            order forward_proxy before file_server
+            log {
+              exclude http.log.error
+            }
+            servers {
+              protocols h1 h2 h3
+            }
+            cache {
+              stale 24h
+              default_cache_control public, max-age=604800
+            }
+          }
+          :18080 {
+            @naive_connect method CONNECT
+            log_skip @naive_connect
+            route {
+              forward_proxy {
+                basic_auth test-user test-password-not-a-secret
+                hide_ip
+                hide_via
+                probe_resistance
+              }
+              cache
+              file_server
+            }
+          }
+          EOF
+          ./caddy validate --config smoke.Caddyfile --adapter caddyfile
+      - name: Package binary and provenance
+        run: |
+          mkdir -p dist/caddy-naive-cache-v2.11.7-linux-amd64
+          cp caddy modules.txt build-info.txt dist/caddy-naive-cache-v2.11.7-linux-amd64/
+          cp forwardproxy/LICENSE dist/caddy-naive-cache-v2.11.7-linux-amd64/LICENSE-forwardproxy
+          cp caddy-bbr/LICENSE dist/caddy-naive-cache-v2.11.7-linux-amd64/LICENSE-caddy
+          cat > dist/caddy-naive-cache-v2.11.7-linux-amd64/BUILD.txt <<EOF
+          NaiveProxy release: v2.11.7-naive
+          forwardproxy commit: c096d6a00cb28e019cc1995b04bdc6a9311d8024
+          Caddy commit: 72dd0fb067f6d7826c7f79907670ba4a713bfe37
+          Patch: official caddy-sing-quic-bbrv1.patch
+          cache-handler: v0.16.0
+          Go: 1.26.9; xcaddy: v0.4.7; linux/amd64/v1; CGO disabled
+          Workflow commit: $GITHUB_SHA
+          Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
+          EOF
+          cd dist
+          sha256sum caddy-naive-cache-v2.11.7-linux-amd64/caddy > caddy-naive-cache-v2.11.7-linux-amd64/caddy.sha256
+          tar -cJf caddy-naive-cache-v2.11.7-linux-amd64.tar.xz caddy-naive-cache-v2.11.7-linux-amd64
+          sha256sum caddy-naive-cache-v2.11.7-linux-amd64.tar.xz > SHA256SUMS
+      - name: Upload binary package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: caddy-naive-cache-v2.11.7-linux-amd64
+          path: |
+            dist/caddy-naive-cache-v2.11.7-linux-amd64.tar.xz
+            dist/SHA256SUMS
+          retention-days: 30
+          if-no-files-found: error
