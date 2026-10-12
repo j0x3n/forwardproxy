@@ -1,4 +1,4 @@
-name: Build NaiveProxy with cache
+name: Build NaiveProxy with cache and rate limit
 on:
   workflow_dispatch:
   push:
@@ -44,20 +44,22 @@ jobs:
         with:
           go-version: '1.26.9'
           cache: false
-      - name: Build with existing cache plugin
+      - name: Build with cache and rate limit
         run: |
           go install github.com/caddyserver/xcaddy/cmd/xcaddy@v0.4.7
           "$(go env GOPATH)/bin/xcaddy" build v2.11.7 \
             --output "$GITHUB_WORKSPACE/caddy" \
             --replace "github.com/caddyserver/caddy/v2=$GITHUB_WORKSPACE/caddy-bbr" \
             --with "github.com/caddyserver/forwardproxy=$GITHUB_WORKSPACE/forwardproxy" \
-            --with github.com/caddyserver/cache-handler@v0.16.0
+            --with github.com/caddyserver/cache-handler@v0.16.0 \
+            --with github.com/mholt/caddy-ratelimit@5625512f24f6f59d6f64fb3aafe5eecff0b286db
       - name: Verify modules and test sample configuration
         run: |
           ./caddy version
           ./caddy list-modules --versions | tee modules.txt
           grep '^http.handlers.forward_proxy ' modules.txt
           grep '^http.handlers.cache v0.16.0' modules.txt
+          grep '^http.handlers.rate_limit ' modules.txt
           ./caddy build-info | tee build-info.txt
           grep 'github.com/sagernet/sing-quic' build-info.txt
           cat > smoke.Caddyfile <<'EOF'
@@ -86,6 +88,13 @@ jobs:
                 hide_via
                 probe_resistance
               }
+              rate_limit {
+                zone smoke {
+                  key {remote_host}
+                  events 100
+                  window 1m
+                }
+              }
               cache
               file_server
             }
@@ -94,30 +103,31 @@ jobs:
           ./caddy validate --config smoke.Caddyfile --adapter caddyfile
       - name: Package binary and provenance
         run: |
-          mkdir -p dist/caddy-naive-cache-v2.11.7-linux-amd64
-          cp caddy modules.txt build-info.txt dist/caddy-naive-cache-v2.11.7-linux-amd64/
-          cp forwardproxy/LICENSE dist/caddy-naive-cache-v2.11.7-linux-amd64/LICENSE-forwardproxy
-          cp caddy-bbr/LICENSE dist/caddy-naive-cache-v2.11.7-linux-amd64/LICENSE-caddy
-          cat > dist/caddy-naive-cache-v2.11.7-linux-amd64/BUILD.txt <<EOF
+          mkdir -p dist/caddy-naive-cache-ratelimit-v2.11.7-linux-amd64
+          cp caddy modules.txt build-info.txt dist/caddy-naive-cache-ratelimit-v2.11.7-linux-amd64/
+          cp forwardproxy/LICENSE dist/caddy-naive-cache-ratelimit-v2.11.7-linux-amd64/LICENSE-forwardproxy
+          cp caddy-bbr/LICENSE dist/caddy-naive-cache-ratelimit-v2.11.7-linux-amd64/LICENSE-caddy
+          cat > dist/caddy-naive-cache-ratelimit-v2.11.7-linux-amd64/BUILD.txt <<EOF
           NaiveProxy release: v2.11.7-naive
           forwardproxy commit: c096d6a00cb28e019cc1995b04bdc6a9311d8024
           Caddy commit: 72dd0fb067f6d7826c7f79907670ba4a713bfe37
           Patch: official caddy-sing-quic-bbrv1.patch
           cache-handler: v0.16.0
+          caddy-ratelimit commit: 5625512f24f6f59d6f64fb3aafe5eecff0b286db
           Go: 1.26.9; xcaddy: v0.4.7; linux/amd64/v1; CGO disabled
           Workflow commit: $GITHUB_SHA
           Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
           EOF
           cd dist
-          sha256sum caddy-naive-cache-v2.11.7-linux-amd64/caddy > caddy-naive-cache-v2.11.7-linux-amd64/caddy.sha256
-          tar -cJf caddy-naive-cache-v2.11.7-linux-amd64.tar.xz caddy-naive-cache-v2.11.7-linux-amd64
-          sha256sum caddy-naive-cache-v2.11.7-linux-amd64.tar.xz > SHA256SUMS
+          sha256sum caddy-naive-cache-ratelimit-v2.11.7-linux-amd64/caddy > caddy-naive-cache-ratelimit-v2.11.7-linux-amd64/caddy.sha256
+          tar -cJf caddy-naive-cache-ratelimit-v2.11.7-linux-amd64.tar.xz caddy-naive-cache-ratelimit-v2.11.7-linux-amd64
+          sha256sum caddy-naive-cache-ratelimit-v2.11.7-linux-amd64.tar.xz > SHA256SUMS
       - name: Upload binary package
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: caddy-naive-cache-v2.11.7-linux-amd64
+          name: caddy-naive-cache-ratelimit-v2.11.7-linux-amd64
           path: |
-            dist/caddy-naive-cache-v2.11.7-linux-amd64.tar.xz
+            dist/caddy-naive-cache-ratelimit-v2.11.7-linux-amd64.tar.xz
             dist/SHA256SUMS
           retention-days: 30
           if-no-files-found: error
