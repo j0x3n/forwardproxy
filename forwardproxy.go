@@ -56,6 +56,10 @@ func init() {
 type Handler struct {
 	logger *zap.Logger
 
+	// UserBandwidth rates are payload bytes/second; omitted users are unlimited.
+	UserBandwidth map[string]BandwidthPolicy `json:"user_bandwidth,omitempty"`
+	BandwidthNamespace string `json:"bandwidth_namespace,omitempty"`
+
 	// Filename of the PAC file to serve.
 	PACPath string `json:"pac_path,omitempty"`
 
@@ -120,6 +124,7 @@ func (Handler) CaddyModule() caddy.ModuleInfo {
 // Provision ensures that h is set up properly before use.
 func (h *Handler) Provision(ctx caddy.Context) error {
 	h.logger = ctx.Logger(h)
+	if err := h.validateBandwidth(); err != nil { return err }
 
 	if h.DialTimeout <= 0 {
 		h.DialTimeout = caddy.Duration(30 * time.Second)
@@ -340,6 +345,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 			return caddyhttp.Error(http.StatusForbidden,
 				fmt.Errorf("hostname %s is not allowed", r.URL.Hostname()))
 		}
+		// Wrap the target side, outside Naive padding and HTTP framing.
+		if limits := h.requestBandwidth(r); limits != nil {
+			base := r.Context()
+			if r.ProtoMajor == 1 { base = context.Background() } // hijacked lifetime
+			streamCtx, cancel := context.WithCancel(base)
+			targetConn = &bandwidthConn{Conn: targetConn, ctx: streamCtx, cancel: cancel, limits: limits}
+		}
 		defer targetConn.Close()
 
 		switch r.ProtoMajor {
@@ -380,6 +392,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 		r.Header.Add("Via", strconv.Itoa(r.ProtoMajor)+"."+strconv.Itoa(r.ProtoMinor)+" caddy")
 	}
 
+	limits := h.requestBandwidth(r)
 	var response *http.Response
 	if h.upstream == nil {
 		// non-upstream request uses httpTransport to reuse connections
@@ -397,6 +410,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 				return io.NopCloser(bytes.NewReader(rBodyBuf)), nil
 			}
 			r.Body, _ = r.GetBody()
+		}
+		if limits != nil {
+			if r.Body != nil { r.Body = &bandwidthBody{ReadCloser: r.Body, ctx: r.Context(), limiter: limits.upload} }
+			if r.GetBody != nil {
+				original := r.GetBody
+				r.GetBody = func() (io.ReadCloser, error) {
+					body, err := original(); if err != nil { return nil, err }
+					return &bandwidthBody{ReadCloser: body, ctx: r.Context(), limiter: limits.upload}, nil
+				}
+			}
 		}
 		response, err = h.httpTransport.RoundTrip(r)
 	} else {
@@ -416,6 +439,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 			return caddyhttp.Error(http.StatusBadGateway,
 				fmt.Errorf("failed to dial upstream: %v", err))
 		}
+		if limits != nil && r.Body != nil { r.Body = &bandwidthBody{ReadCloser: r.Body, ctx: r.Context(), limiter: limits.upload} }
 		err = r.Write(upsConn)
 		if err != nil {
 			return caddyhttp.Error(http.StatusBadGateway,
@@ -443,6 +467,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 			fmt.Errorf("failed to read response: %v", err))
 	}
 
+	if limits != nil && response != nil && response.Body != nil {
+		response.Body = &bandwidthBody{ReadCloser: response.Body, ctx: r.Context(), limiter: limits.download}
+	}
 	return forwardResponse(w, response)
 }
 

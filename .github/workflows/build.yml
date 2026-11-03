@@ -1,9 +1,9 @@
-name: Build NaiveProxy with cache and rate limit
+name: Build NaiveProxy with per-account bandwidth
 on:
   workflow_dispatch:
   push:
     branches: [naive]
-    paths: [.github/workflows/build.yml]
+    paths: ['.github/workflows/build.yml', '**.go', 'go.mod', 'go.sum', 'ci/**']
 permissions:
   contents: read
 concurrency:
@@ -20,11 +20,10 @@ jobs:
       GOAMD64: v1
       XCADDY_GO_BUILD_FLAGS: '-tags=nobadger,nomysql,nopgx'
     steps:
-      - name: Checkout official Naive release source
+      - name: Checkout current branch source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          repository: klzgrad/forwardproxy
-          ref: c096d6a00cb28e019cc1995b04bdc6a9311d8024
+          ref: ${{ github.sha }}
           path: forwardproxy
           persist-credentials: false
       - name: Checkout Caddy 2.11.7
@@ -44,6 +43,12 @@ jobs:
         with:
           go-version: '1.26.9'
           cache: false
+      - name: Format and test account bandwidth
+        working-directory: forwardproxy
+        run: |
+          gofmt -w bandwidth.go bandwidth_test.go forwardproxy.go caddyfile.go
+          # Formatting is performed on the runner; no Go toolchain needed on production.
+          CGO_ENABLED=1 go test -race -count=1 -run '^TestBandwidth' .
       - name: Build with cache and rate limit
         run: |
           go install github.com/caddyserver/xcaddy/cmd/xcaddy@v0.4.7
@@ -84,6 +89,7 @@ jobs:
             route {
               forward_proxy {
                 basic_auth test-user test-password-not-a-secret
+                user_bandwidth test-user 625000 625000
                 hide_ip
                 hide_via
                 probe_resistance
@@ -109,7 +115,7 @@ jobs:
           cp caddy-bbr/LICENSE dist/caddy-naive-cache-ratelimit-v2.11.7-linux-amd64/LICENSE-caddy
           cat > dist/caddy-naive-cache-ratelimit-v2.11.7-linux-amd64/BUILD.txt <<EOF
           NaiveProxy release: v2.11.7-naive
-          forwardproxy commit: c096d6a00cb28e019cc1995b04bdc6a9311d8024
+          forwardproxy commit: $GITHUB_SHA (account bandwidth modification)
           Caddy commit: 72dd0fb067f6d7826c7f79907670ba4a713bfe37
           Patch: official caddy-sing-quic-bbrv1.patch
           cache-handler: v0.16.0

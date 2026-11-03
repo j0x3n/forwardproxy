@@ -58,6 +58,22 @@ func (h *Handler) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 			}
 			h.AuthCredentials = append(h.AuthCredentials, EncodeAuthCredentials(args[0], args[1]))
 
+		case "bandwidth_namespace":
+			args := d.RemainingArgs()
+			if len(args) != 1 || args[0] == "" { return d.ArgErr() }
+			h.BandwidthNamespace = args[0]
+
+		case "user_bandwidth":
+			args := d.RemainingArgs()
+			if len(args) != 3 { return d.ArgErr() }
+			if h.UserBandwidth == nil { h.UserBandwidth = make(map[string]BandwidthPolicy) }
+			if _, exists := h.UserBandwidth[args[0]]; exists { return d.Err("duplicate user_bandwidth") }
+			up, err := strconv.ParseInt(args[1], 10, 64)
+			if err != nil || up < 0 || up > maxBandwidthRate { return d.Err("invalid upload bytes/second") }
+			down, err := strconv.ParseInt(args[2], 10, 64)
+			if err != nil || down < 0 || down > maxBandwidthRate { return d.Err("invalid download bytes/second") }
+			h.UserBandwidth[args[0]] = BandwidthPolicy{Upload: up, Download: down}
+
 		case "hosts":
 			args := d.RemainingArgs()
 			if len(args) == 0 {
