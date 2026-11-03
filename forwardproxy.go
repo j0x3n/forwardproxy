@@ -347,6 +347,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 		}
 		// Wrap the target side, outside Naive padding and HTTP framing.
 		if limits := h.requestBandwidth(r); limits != nil {
+			limits.stats.active.Add(1)
+			defer limits.stats.active.Add(-1)
 			base := r.Context()
 			if r.ProtoMajor == 1 { base = context.Background() } // hijacked lifetime
 			streamCtx, cancel := context.WithCancel(base)
@@ -412,12 +414,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 			r.Body, _ = r.GetBody()
 		}
 		if limits != nil {
-			if r.Body != nil { r.Body = &bandwidthBody{ReadCloser: r.Body, ctx: r.Context(), limiter: limits.upload} }
+			if r.Body != nil { r.Body = &bandwidthBody{ReadCloser: r.Body, ctx: r.Context(), limiter: limits.upload, counter: &limits.stats.upload} }
 			if r.GetBody != nil {
 				original := r.GetBody
 				r.GetBody = func() (io.ReadCloser, error) {
 					body, err := original(); if err != nil { return nil, err }
-					return &bandwidthBody{ReadCloser: body, ctx: r.Context(), limiter: limits.upload}, nil
+					return &bandwidthBody{ReadCloser: body, ctx: r.Context(), limiter: limits.upload, counter: &limits.stats.upload}, nil
 				}
 			}
 		}
@@ -439,7 +441,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 			return caddyhttp.Error(http.StatusBadGateway,
 				fmt.Errorf("failed to dial upstream: %v", err))
 		}
-		if limits != nil && r.Body != nil { r.Body = &bandwidthBody{ReadCloser: r.Body, ctx: r.Context(), limiter: limits.upload} }
+		if limits != nil && r.Body != nil { r.Body = &bandwidthBody{ReadCloser: r.Body, ctx: r.Context(), limiter: limits.upload, counter: &limits.stats.upload} }
 		err = r.Write(upsConn)
 		if err != nil {
 			return caddyhttp.Error(http.StatusBadGateway,
@@ -468,7 +470,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 	}
 
 	if limits != nil && response != nil && response.Body != nil {
-		response.Body = &bandwidthBody{ReadCloser: response.Body, ctx: r.Context(), limiter: limits.download}
+		response.Body = &bandwidthBody{ReadCloser: response.Body, ctx: r.Context(), limiter: limits.download, counter: &limits.stats.download}
 	}
 	return forwardResponse(w, response)
 }

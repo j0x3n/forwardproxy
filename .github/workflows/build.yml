@@ -49,9 +49,10 @@ jobs:
       - name: Format and test account bandwidth
         working-directory: forwardproxy
         run: |
-          gofmt -w bandwidth.go bandwidth_test.go forwardproxy.go caddyfile.go
+          gofmt -w bandwidth.go bandwidth_test.go forwardproxy.go caddyfile.go traffic.go traffic_test.go
+          python3 -m unittest discover -s ci -p 'test_*.py'
           # Formatting is performed on the runner; no Go toolchain needed on production.
-          CGO_ENABLED=1 go test -race -count=1 -run '^TestBandwidth' .
+          CGO_ENABLED=1 go test -race -count=1 -run '^Test(Bandwidth|Traffic)' .
       - name: Build with cache and rate limit
         run: |
           retry() {

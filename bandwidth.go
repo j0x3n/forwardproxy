@@ -9,6 +9,7 @@ import (
  "net/http"
  "strings"
  "sync"
+ "sync/atomic"
 
  "github.com/caddyserver/caddy/v2"
  "golang.org/x/time/rate"
@@ -23,7 +24,7 @@ type BandwidthPolicy struct {
  Download int64 `json:"download"`
 }
 
-type accountBandwidth struct { upload, download *rate.Limiter }
+type accountBandwidth struct { upload, download *rate.Limiter; stats *accountTraffic }
 type bandwidthKey struct { namespace, user string; policy BandwidthPolicy }
 
 // Process-lifetime registry preserves same-policy buckets across config reloads.
@@ -44,7 +45,7 @@ func sharedBandwidth(key bandwidthKey) *accountBandwidth {
  bandwidthRegistry.Lock()
  defer bandwidthRegistry.Unlock()
  if v := bandwidthRegistry.accounts[key]; v != nil { return v }
- v := &accountBandwidth{newBandwidthLimiter(key.policy.Upload), newBandwidthLimiter(key.policy.Download)}
+ v := &accountBandwidth{upload: newBandwidthLimiter(key.policy.Upload), download: newBandwidthLimiter(key.policy.Download), stats: sharedTraffic(key.namespace, key.user)}
  bandwidthRegistry.accounts[key] = v
  return v
 }
@@ -68,15 +69,14 @@ func (h *Handler) validateBandwidth() error {
 
 // Only called on the authenticated proxy path, never on fallback website requests.
 func (h *Handler) requestBandwidth(r *http.Request) *accountBandwidth {
- if len(h.UserBandwidth) == 0 { return nil }
+ if len(h.AuthCredentials) == 0 { return nil }
  repl, ok := r.Context().Value(caddy.ReplacerCtxKey).(*caddy.Replacer)
  if !ok { return nil }
  value, ok := repl.Get("http.auth.user.id")
  if !ok { return nil }
  user, ok := value.(string)
  if !ok { return nil }
- policy, ok := h.UserBandwidth[user]
- if !ok || (policy.Upload == 0 && policy.Download == 0) { return nil }
+ policy := h.UserBandwidth[user]
  return sharedBandwidth(bandwidthKey{h.BandwidthNamespace, user, policy})
 }
 
@@ -111,10 +111,14 @@ type bandwidthConn struct {
  limits *accountBandwidth
 }
 func (c *bandwidthConn) Read(p []byte) (int, error) {
- return bandwidthRead(c.ctx, c.Conn, p, c.limits.download)
+ n, err := bandwidthRead(c.ctx, c.Conn, p, c.limits.download)
+ if c.limits.stats != nil { c.limits.stats.download.Add(uint64(n)) }
+ return n, err
 }
 func (c *bandwidthConn) Write(p []byte) (int, error) {
- return bandwidthWrite(c.ctx, c.Conn, p, c.limits.upload)
+ n, err := bandwidthWrite(c.ctx, c.Conn, p, c.limits.upload)
+ if c.limits.stats != nil { c.limits.stats.upload.Add(uint64(n)) }
+ return n, err
 }
 func (c *bandwidthConn) Close() error { c.cancel(); return c.Conn.Close() }
 func (c *bandwidthConn) CloseWrite() error {
@@ -126,7 +130,10 @@ type bandwidthBody struct {
  io.ReadCloser
  ctx context.Context
  limiter *rate.Limiter
+ counter *atomic.Uint64
 }
 func (b *bandwidthBody) Read(p []byte) (int, error) {
- return bandwidthRead(b.ctx, b.ReadCloser, p, b.limiter)
+ n, err := bandwidthRead(b.ctx, b.ReadCloser, p, b.limiter)
+ if b.counter != nil { b.counter.Add(uint64(n)) }
+ return n, err
 }

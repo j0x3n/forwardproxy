@@ -38,3 +38,24 @@ and configuration. Replacing the executable on disk does not upgrade a running
 process; controlled process switching and connection reconnection are required.
 
 No real credentials, certificates or production configuration belong in CI.
+
+## Account traffic (new; not deployed)
+
+GET `/forward_proxy/traffic` on the Caddy **admin endpoint** returns process epoch,
+namespace/username, upload/download payload byte counters and active CONNECT
+handlers. Unlimited authenticated accounts are metered too. Counters survive
+same-process reloads and rate policy changes, not process restarts. Active tunnels
+are not device/user counts. Reads count payload successfully returned by the
+metered read, not final delivery acknowledgments. Writes count accepted bytes.
+No passwords, Authorization headers, client IPs or destinations are exported.
+Keep admin loopback-only; never expose the admin API through a public proxy.
+
+`ci/traffic_collector.py --db /protected/path/traffic.sqlite3` is a prepared local
+collector; it polls every 10s and persists daily totals (Asia/Shanghai) and recent
+rates. It is not installed/enabled automatically. Epoch reset and duplicate
+sampling are tested. Traffic between the last poll and process death can be lost;
+the first snapshot includes bytes since process start. Each delta is attributed
+to its collection day, so midnight boundary attribution has poll-interval error.
+Counters include only authenticated accounts used since process start. Historical
+activity before feature activation cannot be recovered. Protected web UI and
+collector service integration are still pending; existing audit page is untouched.
